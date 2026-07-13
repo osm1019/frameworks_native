@@ -59,6 +59,7 @@
 #include "GravitySensor.h"
 #include "LimitedAxesImuSensor.h"
 #include "LinearAccelerationSensor.h"
+#include "OplusFusionExt.h"
 #include "OrientationSensor.h"
 #include "RotationVectorSensor.h"
 #include "SensorDirectConnection.h"
@@ -437,6 +438,11 @@ void SensorService::onFirstRef() {
                }
             }
 
+            // Load the OPLUS fusion light sensor (content-immune ALS) after the
+            // AOSP sensors are registered. No-op unless persist.alpha.fusion_light
+            // is set and the engine blob is present.
+            loadOplusFusionSensors(this, list, count);
+
             // Check if the device really supports batching by looking at the FIFO event
             // counts for each sensor.
             bool batchingSupported = false;
@@ -547,6 +553,18 @@ bool SensorService::registerSensor(std::shared_ptr<SensorInterface> s, bool isDe
         return false;
     }
 }
+
+// --- OPLUS fusion-light engine callbacks (libsensorserviceextimpl.so) ---
+// The engine imports these three helpers from libsensorservice. Only
+// hasSensorRecord needs real behavior (the engine checks whether its raw source
+// is registered); the other two are safe no-ops for our bring-up.
+bool SensorService::hasSensorRecord(int handle) {
+    return getSensorInterfaceFromHandle(handle) != nullptr;
+}
+
+void SensorService::onUidIdleForce(unsigned int /*uid*/) {}
+
+void SensorService::setSensorStateForTemporarily(int /*handle*/, bool /*state*/) {}
 
 bool SensorService::registerDynamicSensorLocked(std::shared_ptr<SensorInterface> s, bool isDebug) {
     return registerSensor(std::move(s), isDebug);
