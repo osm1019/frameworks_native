@@ -1360,6 +1360,7 @@ private:
     int getMaxAcquiredBufferCountForRefreshRate(Fps refreshRate) const;
 
     bool isHdrLayer(const frontend::LayerSnapshot& snapshot) const;
+    static bool isVideoBufferLayer(const frontend::LayerSnapshot& snapshot);
 
     ui::Rotation getPhysicalDisplayOrientation(PhysicalDisplayId, bool isPrimary) const
             REQUIRES(mStateLock);

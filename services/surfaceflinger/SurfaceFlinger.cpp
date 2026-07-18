@@ -180,6 +180,7 @@
 #endif
 #endif
 
+#include <aidl/android/hardware/graphics/common/BufferUsage.h>
 #include <aidl/android/hardware/graphics/common/DisplayDecorationSupport.h>
 #include <aidl/android/hardware/graphics/composer3/DisplayCapability.h>
 #include <aidl/android/hardware/graphics/composer3/OutputType.h>
@@ -3628,6 +3629,26 @@ bool SurfaceFlinger::isHdrLayer(const frontend::LayerSnapshot& snapshot) const {
     return false;
 }
 
+bool SurfaceFlinger::isVideoBufferLayer(const frontend::LayerSnapshot& snapshot) {
+    if (!snapshot.externalTexture || !snapshot.buffer) {
+        return false;
+    }
+    // Codec2 tags decoder output buffers with VIDEO_DECODER usage; camera previews carry
+    // HW_CAMERA_WRITE. Both are "live video above the panel" for brightness purposes.
+    constexpr uint64_t kVideoDecoderUsage = static_cast<uint64_t>(
+            aidl::android::hardware::graphics::common::BufferUsage::VIDEO_DECODER);
+    const uint64_t usage = snapshot.externalTexture->getUsage();
+    if ((usage & (kVideoDecoderUsage | GRALLOC_USAGE_HW_CAMERA_WRITE)) != 0) {
+        return true;
+    }
+    // Fallback for decoders that do not set the usage bit: explicit YUV buffer formats
+    // (same set Layer.cpp treats as video for the gralloc metadata workaround).
+    using aidl::android::hardware::graphics::common::PixelFormat;
+    const auto format = static_cast<PixelFormat>(snapshot.buffer->getPixelFormat());
+    return format == PixelFormat::YCBCR_420_888 || format == PixelFormat::YV12 ||
+            format == PixelFormat::YCBCR_P010;
+}
+
 ui::Rotation SurfaceFlinger::getPhysicalDisplayOrientation(PhysicalDisplayId displayId,
                                                            bool isPrimary) const {
     if (!mIgnoreHwcPhysicalDisplayOrientation &&
@@ -3828,12 +3849,23 @@ void SurfaceFlinger::onCompositionPresented(PhysicalDisplayId pacesetterId,
             for (auto& [compositionDisplay, listener] : hdrInfoListeners) {
                 HdrLayerInfoReporter::HdrLayerInfo info;
                 int32_t maxArea = 0;
+                int32_t maxVideoArea = 0;
 
                 auto updateInfoFn = [&](compositionengine::Display* compositionDisplay,
                                         const frontend::LayerSnapshot& snapshot,
                                         const sp<LayerFE>& layerFe) {
                     if (snapshot.isVisible &&
                         compositionDisplay->includesLayer(snapshot.outputFilter)) {
+                        if (isVideoBufferLayer(snapshot)) {
+                            const auto* outputLayer =
+                                    compositionDisplay->getOutputLayerForLayer(layerFe);
+                            if (outputLayer) {
+                                const auto displayFrame = outputLayer->getState().displayFrame;
+                                maxVideoArea = std::max(maxVideoArea,
+                                                        displayFrame.width() *
+                                                                displayFrame.height());
+                            }
+                        }
                         if (isHdrLayer(snapshot)) {
                             const auto* outputLayer =
                                     compositionDisplay->getOutputLayerForLayer(layerFe);
@@ -3876,6 +3908,13 @@ void SurfaceFlinger::onCompositionPresented(PhysicalDisplayId pacesetterId,
 
                             updateInfoFn(compositionDisplay, *snapshot, layerFe);
                         });
+                const auto displayBounds =
+                        compositionDisplay->getState().displaySpace.getBoundsAsRect();
+                const int64_t displayArea =
+                        int64_t(displayBounds.getWidth()) * displayBounds.getHeight();
+                if (displayArea > 0 && int64_t(maxVideoArea) * 2 >= displayArea) {
+                    info.flags |= HdrLayerInfoReporter::HDR_INFO_FLAG_FULLSCREEN_VIDEO;
+                }
                 listener->dispatchHdrLayerInfo(info);
             }
         }
@@ -10693,6 +10732,7 @@ void SurfaceFlinger::updateHdrInfos(
     struct AccumulatedHdrInfo {
         HdrLayerInfoReporter::HdrLayerInfo layerInfo{};
         int32_t maxArea{0};
+        int32_t maxVideoArea{0};
         bool hdrAllowed{true};
     };
     ui::DisplayMap<DisplayId, AccumulatedHdrInfo> hdrInfosForDisplay;
@@ -10801,12 +10841,37 @@ void SurfaceFlinger::updateHdrInfos(
                         }
                     }
                 }
+
+                if (snapshot->isVisible && isVideoBufferLayer(*snapshot)) {
+                    for (const auto& [display, _] : listeners) {
+                        const auto hdrInfoOpt = hdrInfosForDisplay.get(display->getId());
+                        if (!hdrInfoOpt || !display->includesLayer(snapshot->outputFilter)) {
+                            continue;
+                        }
+                        const auto* outputLayer = display->getOutputLayerForLayer(layerFe);
+                        if (!outputLayer) {
+                            continue;
+                        }
+                        const auto displayFrame = outputLayer->getState().displayFrame;
+                        const int32_t area = displayFrame.width() * displayFrame.height();
+                        auto& hdrInfo = hdrInfoOpt->get();
+                        hdrInfo.maxVideoArea = std::max(hdrInfo.maxVideoArea, area);
+                    }
+                }
             });
 
     for (const auto& [display, reporter] : listeners) {
         const auto hdrInfoOpt = hdrInfosForDisplay.get(display->getId());
         if (hdrInfoOpt) {
-            reporter->dispatchHdrLayerInfo(hdrInfoOpt->get().layerInfo);
+            auto& accumulated = hdrInfoOpt->get();
+            const auto displayBounds = display->getState().displaySpace.getBoundsAsRect();
+            const int64_t displayArea =
+                    int64_t(displayBounds.getWidth()) * displayBounds.getHeight();
+            if (displayArea > 0 && int64_t(accumulated.maxVideoArea) * 2 >= displayArea) {
+                accumulated.layerInfo.flags |=
+                        HdrLayerInfoReporter::HDR_INFO_FLAG_FULLSCREEN_VIDEO;
+            }
+            reporter->dispatchHdrLayerInfo(accumulated.layerInfo);
         }
     }
 }

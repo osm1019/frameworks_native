@@ -30,6 +30,13 @@ namespace android {
 
 class HdrLayerInfoReporter final : public IBinder::DeathRecipient {
 public:
+    // Set in HdrLayerInfo::flags when a visible video-buffer layer (video decoder or
+    // camera output) covers at least half of the display. Rides the existing listener
+    // callback so DisplayManagerService can boost fullscreen SDR video without new
+    // plumbing. Upstream keeps flags at 0 (TODO b/182312559); use a high bit to stay
+    // clear of any future upstream assignment.
+    static constexpr int32_t HDR_INFO_FLAG_FULLSCREEN_VIDEO = 1 << 30;
+
     struct HdrLayerInfo {
         int32_t numberOfHdrLayers = 0;
         int32_t maxW = 0;
